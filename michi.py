@@ -26,10 +26,13 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import math
 import multiprocessing
 import random
 import re
+import shutil
+import subprocess
 import sys
 import time
 from functools import reduce
@@ -261,8 +264,9 @@ pat_gridcular_seq = [  # Sequence of coordinate offsets of progressively wider d
         [-7, 0],
     ],
 ]
-spat_patterndict_file = 'patterns.spat'
-large_patterns_file = 'patterns.prob'
+
+SPAT_PATTERNDICT_FILE = 'patterns/spat.zst'
+LARGE_PATTERNS_FILE = 'patterns/prob.zst'
 
 
 #######################
@@ -1563,20 +1567,120 @@ def gtp_io():
         sys.stdout.flush()
 
 
+class CompressedFile:
+    """
+    A wrapper class to decompress and read a zstd-compressed text file.
+
+    This class uses the `zstd -dc` command via a subprocess to stream the
+    decompressed content and decodes it into text. It is designed to be
+    used as a context manager.
+
+    Args:
+        filename (str): The path to the .zst file to be read.
+        encoding (str, optional): The text encoding to use for decoding the
+            file's content. Defaults to 'utf-8'.
+
+    Raises:
+        FileNotFoundError: If the 'zstd' command-line tool is not found
+            in the system's PATH.
+        subprocess.CalledProcessError: If the zstd command returns a non-zero
+            exit code (e.g., if the input file is not found or corrupt).
+    """
+
+    def __init__(self, filename: str, encoding: str = 'utf-8'):
+        # Check if the zstd command exists on the system PATH
+        if not shutil.which('zstd'):
+            raise FileNotFoundError(
+                "The 'zstd' command was not found. Please install the "
+                "zstandard utility on your system."
+            )
+
+        self.filename = filename
+        self.encoding = encoding
+        self._process = None
+        self._text_stream = None
+
+    def __enter__(self):
+        """Starts the zstd subprocess and prepares the text stream."""
+        command = ['zstd', '-dc', self.filename]
+
+        # Start the subprocess. stdout is piped so we can read from it.
+        # stderr is also piped to capture any errors from the zstd command.
+        self._process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # Set buffer size to 0 to prevent Popen from buffering stdout
+            # before it reaches the TextIOWrapper.
+            bufsize=0,
+        )
+
+        # Wrap the binary stdout stream in a text decoder
+        self._text_stream = io.TextIOWrapper(
+            self._process.stdout, encoding=self.encoding
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Cleans up resources by closing the stream and terminating the process."""
+        # The text stream must be closed first, as it may try to flush
+        # data to the (soon to be closed) subprocess pipe.
+        if self._text_stream:
+            self._text_stream.close()
+
+        if self._process:
+            # Wait for the process to finish and get its return code
+            return_code = self._process.wait()
+
+            # If the process exited with an error, raise an exception
+            if return_code != 0:
+                # Read the error message from stderr
+                stderr_output = (
+                    self._process.stderr.read()
+                    .decode(self.encoding, 'ignore')
+                    .strip()
+                )
+                raise subprocess.CalledProcessError(
+                    return_code, self._process.args, stderr=stderr_output
+                )
+
+        # Return False to propagate any exceptions that occurred inside the 'with' block
+        return False
+
+    def readlines(self):
+        """
+        Reads all lines from the decompressed stream and returns them as a list.
+        """
+        if not self._text_stream:
+            raise IOError(
+                "Cannot read from a closed or uninitialized stream. "
+                "Use this reader within a 'with' block."
+            )
+        return self._text_stream.readlines()
+
+    def __iter__(self):
+        """Allows iterating over the lines of the decompressed file."""
+        if not self._text_stream:
+            raise IOError(
+                "Cannot iterate over a closed or uninitialized stream. "
+                "Use this reader within a 'with' block."
+            )
+        return self._text_stream
+
+
 def main():
     random.seed(0)
     try:
-        with open(spat_patterndict_file) as f:
+        with CompressedFile(SPAT_PATTERNDICT_FILE) as f:
             print('Loading pattern spatial dictionary...', file=sys.stderr)
             load_spat_patterndict(f)
-        with open(large_patterns_file) as f:
+        with CompressedFile(LARGE_PATTERNS_FILE) as f:
             print('Loading large patterns...', file=sys.stderr)
             load_large_patterns(f)
         print('Done.', file=sys.stderr)
-    except IOError as e:
+    except (IOError, subprocess.CalledProcessError):
         print(
-            'Warning: Cannot load pattern files: %s; will be much weaker, consider lowering EXPAND_VISITS 5->2'
-            % (e,),
+            'Warning: Cannot load pattern files:will be much weaker, consider lowering EXPAND_VISITS 5->2',
             file=sys.stderr,
         )
     if len(sys.argv) < 2:
