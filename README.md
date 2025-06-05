@@ -31,11 +31,16 @@ gtp argument and start it in gogui, or let it play GNUGo:
 	gogui/bin/gogui-twogtp -black './michi.py gtp' -white 'gnugo --mode=gtp --chinese-rules --capture-all-dead' -size 9 -komi 7.5 -verbose -auto
 
 It is *highly* recommended that you download Michi large-scale pattern files
-(patterns.prob, patterns.spat):
+(patterns/prob.zst, patterns/spat.zst).  They were previously available from
 
 	http://pachi.or.cz/michi-pat/
 
-Store and unpack them in the current directory for Michi to find.
+Now they have been added as a git submodule.  Run the following to download
+them:
+
+	git submodule init
+	git submodule update
+
 
 Understanding and Hacking
 -------------------------
