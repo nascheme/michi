@@ -466,7 +466,7 @@ class Position:
             if c is None:
                 continue
             dlist = [c] + list(neighbors(c) + diag_neighbors(c))
-            random.shuffle(dlist)
+            RND.shuffle(dlist)
             clist += [d for d in dlist if d not in clist]
         return clist
 
@@ -844,21 +844,21 @@ def gen_playout_moves(
 
     # Check whether any local group is in atari and fill that liberty
     # print('local moves', [str_coord(c) for c in heuristic_set], file=sys.stderr)
-    if random.random() <= probs['capture']:
+    if RND.random() <= probs['capture']:
         already_suggested = set()
         for c in heuristic_set:
             if pos.board[c] in 'Xx':
                 in_atari, ds = fix_atari(
                     pos, c, twolib_edgeonly=not expensive_ok
                 )
-                random.shuffle(ds)
+                RND.shuffle(ds)
                 for d in ds:
                     if d not in already_suggested:
                         yield (d, 'capture ' + str(c))
                         already_suggested.add(d)
 
     # Try to apply a 3x3 pattern on the local neighborhood
-    if random.random() <= probs['pat3']:
+    if RND.random() <= probs['pat3']:
         already_suggested = set()
         for c in heuristic_set:
             if (
@@ -871,7 +871,7 @@ def gen_playout_moves(
 
     # Try *all* available moves, but starting from a random point
     # (in other words, suggest a random move)
-    x, y = random.randint(1, N), random.randint(1, N)
+    x, y = RND.randint(1, N), RND.randint(1, N)
     for c in pos.moves(y * W + x):
         yield (c, 'random')
 
@@ -905,7 +905,7 @@ def mcplayout(pos, amaf_map, disp=False):
                 if pos2 is None:
                     continue
                 # check if the suggested move did not turn out to be a self-atari
-                if random.random() <= (
+                if RND.random() <= (
                     PROB_RSAREJECT if kind == 'random' else PROB_SSAREJECT
                 ):
                     in_atari, ds = fix_atari(
@@ -1086,7 +1086,7 @@ def tree_descend(tree, amaf_map, disp=False):
         if disp:
             for c in children:
                 dump_subtree(c, recurse=False)
-        random.shuffle(children)  # randomize the max in case of equal urgency
+        RND.shuffle(children)  # randomize the max in case of equal urgency
         node = max(children, key=lambda node: node.rave_urgency())
         nodes.append(node)
 
@@ -1149,6 +1149,10 @@ FORCE_THREADS = False
 WORKER_POOL = None
 
 
+def pool_init():
+    setup_random()
+
+
 def tree_search(tree, n, owner_map, disp=False):
     """Perform MCTS search from a given position for a given #iterations"""
     # Initialize root node
@@ -1174,10 +1178,12 @@ def tree_search(tree, n, owner_map, disp=False):
     if WORKER_POOL is None:
         if FORCE_THREADS or not sys._is_gil_enabled():
             print(f'using thread pool, n = {n_workers}')
-            WORKER_POOL = ThreadPool(processes=n_workers)
+            WORKER_POOL = ThreadPool(
+                processes=n_workers, initializer=pool_init
+            )
         else:
             print(f'using process pool, n = {n_workers}')
-            WORKER_POOL = Pool(processes=n_workers)
+            WORKER_POOL = Pool(processes=n_workers, initializer=pool_init)
     outgoing = []  # positions waiting for a playout
     incoming = []  # positions that finished evaluation
     ongoing = []  # currently ongoing playout jobs
@@ -1669,10 +1675,15 @@ class CompressedFile:
         return self._text_stream
 
 
+def setup_random(seed=0):
+    global RND
+    RND = random.Random(x=seed)
+
+
 def main():
     global FORCE_THREADS
 
-    random.seed(0)
+    setup_random()
     try:
         with CompressedFile(SPAT_PATTERNDICT_FILE) as f:
             print('Loading pattern spatial dictionary...', file=sys.stderr)
