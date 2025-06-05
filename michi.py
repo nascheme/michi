@@ -1,4 +1,4 @@
-#!/usr/bin/env pypy
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # (c) Petr Baudis <pasky@ucw.cz>  2015
@@ -23,16 +23,17 @@
 # It may be better to jump around a bit instead of just reading straight
 # from start to end.
 
-from __future__ import print_function
-from collections import namedtuple
+from __future__ import annotations
 from itertools import count
 import math
 import multiprocessing
-from multiprocessing.pool import Pool
+from multiprocessing.pool import Pool, ThreadPool
 import random
 import re
 import sys
 import time
+from functools import reduce
+import dataclasses
 
 
 # Given a board of size NxN (N=9, 19, ...), we represent the position
@@ -149,7 +150,7 @@ def board_put(board, c, p):
 def floodfill(board, c):
     """ replace continuous-color area starting at c with special color # """
     # This is called so much that a bytearray is worthwhile...
-    byteboard = bytearray(board)
+    byteboard = bytearray(board,  'ascii')
     p = byteboard[c]
     byteboard[c] = ord('#')
     fringe = [c]
@@ -159,7 +160,7 @@ def floodfill(board, c):
             if byteboard[d] == p:
                 byteboard[d] = ord('#')
                 fringe.append(d)
-    return str(byteboard)
+    return byteboard.decode('ascii')
 
 
 # Regex that matches various kind of points adjecent to '#' (floodfilled) points
@@ -220,9 +221,18 @@ def is_eye(board, c):
     return eyecolor
 
 
-class Position(namedtuple('Position', 'board cap n ko last last2 komi')):
+@dataclasses.dataclass(frozen=True)
+class Position:
     """ Implementation of simple Chinese Go rules;
     n is how many moves were played so far """
+
+    board: str
+    cap:  tuple
+    n: int
+    ko: tuple
+    last: Position
+    last2: Position
+    komi: float
 
     def move(self, c):
         """ play as player X at the given coord c, return the new position """
@@ -330,7 +340,7 @@ class Position(namedtuple('Position', 'board cap n ko last last2 komi')):
 
 def empty_position():
     """ Return an initial board position """
-    return Position(board=empty, cap=(0, 0), n=0, ko=None, last=None, last2=None, komi=7.5)
+    return Position(board=empty, cap=(0, 0), n=0, ko=None, last=None, last2=None, komi=6.5)
 
 
 ###############
@@ -539,7 +549,7 @@ def load_large_patterns(f):
     for line in f:
         # line: 0.004 14 3842 (capture:17 border:0 s:784)
         p = float(line.split()[0])
-        m = re.search('s:(\d+)', line)
+        m = re.search(r's:(\d+)', line)
         if m is not None:
             s = int(m.groups()[0])
             large_patterns[s] = p
@@ -633,44 +643,51 @@ def mcplayout(pos, amaf_map, disp=False):
     return score for to-play player at the starting position;
     amaf_map is board-sized scratchpad recording who played at a given
     position first """
-    if disp:  print('** SIMULATION **', file=sys.stderr)
-    start_n = pos.n
-    passes = 0
-    while passes < 2 and pos.n < MAX_GAME_LEN:
-        if disp:  print_pos(pos)
-
-        pos2 = None
-        # We simply try the moves our heuristics generate, in a particular
-        # order, but not with 100% probability; this is on the border between
-        # "rule-based playouts" and "probability distribution playouts".
-        for c, kind in gen_playout_moves(pos, pos.last_moves_neighbors(), PROB_HEURISTIC):
-            if disp and kind != 'random':
-                print('move suggestion', str_coord(c), kind, file=sys.stderr)
-            pos2 = pos.move(c)
-            if pos2 is None:
-                continue
-            # check if the suggested move did not turn out to be a self-atari
-            if random.random() <= (PROB_RSAREJECT if kind == 'random' else PROB_SSAREJECT):
-                in_atari, ds = fix_atari(pos2, c, singlept_ok=True, twolib_edgeonly=True)
-                if ds:
-                    if disp:  print('rejecting self-atari move', str_coord(c), file=sys.stderr)
-                    pos2 = None
-                    continue
-            if amaf_map[c] == 0:  # Mark the coordinate with 1 for black
-                amaf_map[c] = 1 if pos.n % 2 == 0 else -1
-            break
-        if pos2 is None:  # no valid moves, pass
-            pos = pos.pass_move()
-            passes += 1
-            continue
+    try:
+        if disp:  print('** SIMULATION **', file=sys.stderr)
+        start_n = pos.n
         passes = 0
-        pos = pos2
+        while passes < 2 and pos.n < MAX_GAME_LEN:
+            if disp:  print_pos(pos)
 
-    owner_map = W*W*[0]
-    score = pos.score(owner_map)
-    if disp:  print('** SCORE B%+.1f **' % (score if pos.n % 2 == 0 else -score), file=sys.stderr)
-    if start_n % 2 != pos.n % 2:
-        score = -score
+            pos2 = None
+            # We simply try the moves our heuristics generate, in a particular
+            # order, but not with 100% probability; this is on the border between
+            # "rule-based playouts" and "probability distribution playouts".
+            for c, kind in gen_playout_moves(pos, pos.last_moves_neighbors(), PROB_HEURISTIC):
+                if disp and kind != 'random':
+                    print('move suggestion', str_coord(c), kind, file=sys.stderr)
+                pos2 = pos.move(c)
+                if pos2 is None:
+                    continue
+                # check if the suggested move did not turn out to be a self-atari
+                if random.random() <= (PROB_RSAREJECT if kind == 'random' else PROB_SSAREJECT):
+                    in_atari, ds = fix_atari(pos2, c, singlept_ok=True, twolib_edgeonly=True)
+                    if ds:
+                        if disp:  print('rejecting self-atari move', str_coord(c), file=sys.stderr)
+                        pos2 = None
+                        continue
+                if amaf_map[c] == 0:  # Mark the coordinate with 1 for black
+                    amaf_map[c] = 1 if pos.n % 2 == 0 else -1
+                break
+            if pos2 is None:  # no valid moves, pass
+                pos = pos.pass_move()
+                passes += 1
+                continue
+            passes = 0
+            pos = pos2
+
+        owner_map = W*W*[0]
+        score = pos.score(owner_map)
+        if disp:  print('** SCORE B%+.1f **' % (score if pos.n % 2 == 0 else -score), file=sys.stderr)
+        if start_n % 2 != pos.n % 2:
+            score = -score
+    except Exception as e:
+        import traceback
+        traceback_output = traceback.format_exc()
+        print(traceback_output)
+        print(e)
+        raise
     return score, amaf_map, owner_map
 
 
@@ -693,6 +710,9 @@ class TreeNode():
         self.aw = 0
         self.children = None
 
+    def add_child(self, child):
+        self.children.append(child)
+
     def expand(self):
         """ add and initialize children to a leaf node """
         cfg_map = cfg_distances(self.pos.board, self.pos.last) if self.pos.last is not None else None
@@ -712,7 +732,7 @@ class TreeNode():
                 node = childset[pos2.last]
             except KeyError:
                 node = TreeNode(pos2)
-                self.children.append(node)
+                self.add_child(node)
                 childset[pos2.last] = node
 
             if kind.startswith('capture'):
@@ -760,7 +780,7 @@ class TreeNode():
 
         if not self.children:
             # No possible moves, add a pass move
-            self.children.append(TreeNode(self.pos.pass_move()))
+            self.add_child(TreeNode(self.pos.pass_move()))
 
     def rave_urgency(self):
         v = self.v + self.pv
@@ -831,6 +851,8 @@ def tree_update(nodes, amaf_map, score, disp=False):
         score = -score
 
 
+FORCE_THREADS = False
+
 worker_pool = None
 
 def tree_search(tree, n, owner_map, disp=False):
@@ -851,9 +873,15 @@ def tree_search(tree, n, owner_map, disp=False):
     # that tradeoff by adjusting the EXPAND_VISITS constant.)
 
     n_workers = multiprocessing.cpu_count() if not disp else 1  # set to 1 when debugging
+
     global worker_pool
     if worker_pool is None:
-        worker_pool = Pool(processes=n_workers)
+        if FORCE_THREADS or not sys._is_gil_enabled():
+            print(f'using thread pool, n = {n_workers}')
+            worker_pool = ThreadPool(processes=n_workers)
+        else:
+            print(f'using process pool, n = {n_workers}')
+            worker_pool = Pool(processes=n_workers)
     outgoing = []  # positions waiting for a playout
     incoming = []  # positions that finished evaluation
     ongoing = []  # currently ongoing playout jobs
@@ -892,7 +920,7 @@ def tree_search(tree, n, owner_map, disp=False):
             if not job.ready():
                 continue
             # Yes! Queue them up for storing in the tree.
-            score, amaf_map, owner_map_one = job.get()
+            score, amaf_map, owner_map_one = job.get(None)
             incoming.append((score, amaf_map, owner_map_one, nodes))
             ongoing.remove((job, nodes))
 
@@ -1010,7 +1038,7 @@ def game_io(computer_black=False):
         if not (tree.pos.n == 0 and computer_black):
             print_pos(tree.pos, sys.stdout, owner_map)
 
-            sc = raw_input("Your move: ")
+            sc = input("Your move: ")
             try:
                 c = parse_coord(sc)
             except:
@@ -1023,7 +1051,7 @@ def game_io(computer_black=False):
                     continue
 
                 # Find the next node in the game tree and proceed there
-                nodes = filter(lambda n: n.pos.last == c, tree.children)
+                nodes = list(filter(lambda n: n.pos.last == c, tree.children))
                 if not nodes:
                     print('Bad move (rule violation)')
                     continue
@@ -1065,13 +1093,13 @@ def gtp_io():
 
     while True:
         try:
-            line = raw_input().strip()
+            line = input().strip()
         except EOFError:
             break
         if line == '':
             continue
         command = [s.lower() for s in line.split()]
-        if re.match('\d+', command[0]):
+        if re.match(r'\d+', command[0]):
             cmdid = command[0]
             command = command[1:]
         else:
@@ -1095,7 +1123,8 @@ def gtp_io():
             if c is not None:
                 # Find the next node in the game tree and proceed there
                 if tree.children is not None and filter(lambda n: n.pos.last == c, tree.children):
-                    tree = filter(lambda n: n.pos.last == c, tree.children)[0]
+                    xs = filter(lambda n: n.pos.last == c, tree.children)
+                    tree = list(xs)[0]
                 else:
                     # Several play commands in row, eye-filling move, etc.
                     tree = TreeNode(pos=tree.pos.move(c))
@@ -1151,7 +1180,8 @@ def gtp_io():
         sys.stdout.flush()
 
 
-if __name__ == "__main__":
+def main():
+    random.seed(0)
     try:
         with open(spat_patterndict_file) as f:
             print('Loading pattern spatial dictionary...', file=sys.stderr)
@@ -1183,3 +1213,7 @@ if __name__ == "__main__":
         print_pos(tree_search(TreeNode(pos=empty_position()), N_SIMS, W*W*[0], disp=True).pos)
     else:
         print('Unknown action', file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
