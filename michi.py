@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import io
 import math
@@ -1145,7 +1146,7 @@ def tree_update(nodes, amaf_map, score, disp=False):
 
 FORCE_THREADS = False
 
-worker_pool = None
+WORKER_POOL = None
 
 
 def tree_search(tree, n, owner_map, disp=False):
@@ -1169,14 +1170,14 @@ def tree_search(tree, n, owner_map, disp=False):
         multiprocessing.cpu_count() if not disp else 1
     )  # set to 1 when debugging
 
-    global worker_pool
-    if worker_pool is None:
+    global WORKER_POOL
+    if WORKER_POOL is None:
         if FORCE_THREADS or not sys._is_gil_enabled():
             print(f'using thread pool, n = {n_workers}')
-            worker_pool = ThreadPool(processes=n_workers)
+            WORKER_POOL = ThreadPool(processes=n_workers)
         else:
             print(f'using process pool, n = {n_workers}')
-            worker_pool = Pool(processes=n_workers)
+            WORKER_POOL = Pool(processes=n_workers)
     outgoing = []  # positions waiting for a playout
     incoming = []  # positions that finished evaluation
     ongoing = []  # currently ongoing playout jobs
@@ -1201,7 +1202,7 @@ def tree_search(tree, n, owner_map, disp=False):
             nodes, amaf_map = outgoing.pop()
             ongoing.append(
                 (
-                    worker_pool.apply_async(
+                    WORKER_POOL.apply_async(
                         mcplayout, (nodes[-1].pos, amaf_map, disp)
                     ),
                     nodes,
@@ -1669,6 +1670,8 @@ class CompressedFile:
 
 
 def main():
+    global FORCE_THREADS
+
     random.seed(0)
     try:
         with CompressedFile(SPAT_PATTERNDICT_FILE) as f:
@@ -1683,18 +1686,62 @@ def main():
             'Warning: Cannot load pattern files:will be much weaker, consider lowering EXPAND_VISITS 5->2',
             file=sys.stderr,
         )
-    if len(sys.argv) < 2:
-        # Default action
-        game_io()
-    elif sys.argv[1] == "white":
-        game_io(computer_black=True)
-    elif sys.argv[1] == "gtp":
+
+    # --- Argument Parsing Phase ---
+    parser = argparse.ArgumentParser(
+        description="Run a simple Go program with various modes of operation."
+    )
+    parser.add_argument(
+        '--force-threads',
+        action='store_true',
+        help='Force the use of threads even if the GIL is enabled.',
+    )
+
+    # Use subparsers for mutually exclusive commands like 'game', 'gtp', 'benchmark', etc.
+    subparsers = parser.add_subparsers(
+        dest='command', help='Available commands'
+    )
+
+    # Command: game (replaces the old default and 'white' argument)
+    parser_game = subparsers.add_parser(
+        'game', help='Play a game against the computer.'
+    )
+    parser_game.add_argument(
+        '--white',
+        action='store_true',
+        help='Set the computer to play as Black.',
+    )
+
+    # Command: gtp
+    subparsers.add_parser('gtp', help='Run in Go Text Protocol (GTP) mode.')
+
+    # Command: mcdebug
+    subparsers.add_parser('mcdebug', help='Run a Monte Carlo debug playout.')
+
+    # Command: mcbenchmark
+    subparsers.add_parser('mcbenchmark', help='Run a Monte Carlo benchmark.')
+
+    # Command: tsbenchmark
+    subparsers.add_parser('tsbenchmark', help='Run a Tree Search benchmark.')
+
+    # Command: tsdebug
+    subparsers.add_parser(
+        'tsdebug', help='Run a Tree Search with debug info.'
+    )
+
+    args = parser.parse_args()
+    FORCE_THREADS = args.force_threads
+
+    # --- Execution Phase ---
+    if args.command == 'game':
+        game_io(computer_black=args.white)
+    elif args.command == 'gtp':
         gtp_io()
-    elif sys.argv[1] == "mcdebug":
+    elif args.command == 'mcdebug':
         print(mcplayout(empty_position(), W * W * [0], disp=True)[0])
-    elif sys.argv[1] == "mcbenchmark":
+    elif args.command == 'mcbenchmark':
         print(mcbenchmark(20))
-    elif sys.argv[1] == "tsbenchmark":
+    elif args.command == 'tsbenchmark':
         t_start = time.time()
         print_pos(
             tree_search(
@@ -1704,24 +1751,22 @@ def main():
                 disp=False,
             ).pos
         )
+        duration = time.time() - t_start
+        cpus = multiprocessing.cpu_count()
+        speed = N_SIMS / (duration * cpus)
         print(
-            'Tree search with %d playouts took %.3fs with %d threads; speed is %.3f playouts/thread/s'
-            % (
-                N_SIMS,
-                time.time() - t_start,
-                multiprocessing.cpu_count(),
-                N_SIMS
-                / ((time.time() - t_start) * multiprocessing.cpu_count()),
-            )
+            f'Tree search with {N_SIMS} playouts took {duration:.3f}s on {cpus} threads.'
         )
-    elif sys.argv[1] == "tsdebug":
+        print(f'Speed: {speed:.3f} playouts/thread/s')
+    elif args.command == 'tsdebug':
         print_pos(
             tree_search(
                 TreeNode(pos=empty_position()), N_SIMS, W * W * [0], disp=True
             ).pos
         )
     else:
-        print('Unknown action', file=sys.stderr)
+        # Default action if no command is specified
+        game_io()
 
 
 if __name__ == "__main__":
